@@ -15,6 +15,10 @@ const config = {
   i18n: {
     locales: ['en-UZ', 'en', 'ru'],
     defaultLocale: 'en-UZ',
+    // Never auto-redirect `/` based on Accept-Language: English browsers would
+    // land on `/en`, where most articles are untranslated stubs. Explicit user
+    // choice still works via the NEXT_LOCALE cookie in nextra's middleware.
+    localeDetection: false,
   },
   reactStrictMode: true,
   typescript: {
