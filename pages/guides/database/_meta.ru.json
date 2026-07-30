@@ -52,5 +52,11 @@
     "icon": "▶️",
     "description": "Работа с SQL запросами в PostgreSQL",
     "href": "/guides/database/postgresql-bilan-ishlash"
+  },
+  "sql-injection": {
+    "title": "SQL Injection",
+    "icon": "▶️",
+    "description": "Что такое SQL Injection и как это предотвратить",
+    "href": "/guides/database/sql-injection"
   }
 }

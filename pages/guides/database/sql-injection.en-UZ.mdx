@@ -1,0 +1,476 @@
+---
+description: "SQL Injection Attack: bu nima va uni qanday oldini olish mumkin"
+---
+
+import { Callout } from "nextra-theme-docs";
+
+# SQL Injection Attack: bu nima va uni qanday oldini olish mumkin
+
+## Kirish
+
+**SQL Injection** (qisqacha **SQLi**) — bu hujumchi ilovaning ma'lumotlar bazasiga yuboradigan SQL so'roviga o'z kodini "qo'shib yuborishi" mumkin bo'lgan zaiflik. Sababi deyarli har doim bitta: **foydalanuvchidan kelgan ma'lumot SQL so'rov matniga oddiy string sifatida ulanadi**.
+
+Bu eski va mashhur zaiflik bo'lishiga qaramay, u hozirgacha OWASP Top 10 ro'yxatidan chiqmagan (A03:2021 — Injection). Chunki har bir yangi loyihada, har bir shoshib yozilgan admin panelda yoki "vaqtincha" qo'shilgan reportda u yana paydo bo'ladi.
+
+SQLi orqali hujumchi nima qila oladi:
+
+* butun `users` tablesini o'qib olish (parol hashlari, emaillar, telefon raqamlari);
+* autentifikatsiyani chetlab o'tib, admin sifatida kirish;
+* ma'lumotni o'zgartirish yoki o'chirish;
+* ba'zi hollarda serverning fayllarini o'qish yoki komanda bajarish (DB user'ning huquqlari keragidan ortiq bo'lsa).
+
+<Callout type="warning" emoji="">
+Ushbu qo'llanmadagi hujum misollari **faqat o'z tizimingizni tekshirish va himoyalash** uchun. Boshqa shaxsning tizimini ruxsatsiz tekshirish — jinoyat.
+</Callout>
+
+## SQL Injection qanday ishlaydi?
+
+Klassik misol — login formasi. Zaif kod so'rovni string birlashtirish (concatenation) orqali quradi:
+
+```js
+// ❌ ZAIF KOD — hech qachon shunday yozmang
+const email = req.body.email;
+const rows = await conn.query(
+  "SELECT id, email FROM users WHERE email = '" + email + "'"
+);
+```
+
+Oddiy foydalanuvchi `otabek@example.com` kiritsa, so'rov quyidagicha bo'ladi:
+
+```sql
+SELECT id, email FROM users WHERE email = 'otabek@example.com'
+```
+
+Endi hujumchi email maydoniga quyidagini kiritadi:
+
+```
+' OR 1=1 -- 
+```
+
+So'rov shunday o'zgaradi:
+
+```sql
+SELECT id, email FROM users WHERE email = '' OR 1=1 -- '
+```
+
+`OR 1=1` sharti har doim rost, `--` esa qolgan qismni comment qiladi. Natijada so'rov **barcha** foydalanuvchilarni qaytaradi va ko'p ilovalarda bu birinchi user (odatda admin) sifatida login bo'lish degani.
+
+Muammoning ildizi shunda: ma'lumotlar bazasi uchun `' OR 1=1 -- ` matn emas, **SQL kodi** bo'lib qoldi. Data va kod bir-biriga aralashdi.
+
+## SQL Injection turlari
+
+### 1. In-band (klassik) SQLi
+
+Hujumchi natijani xuddi shu so'rov javobida ko'radi.
+
+**UNION-based** — hujumchi o'z `SELECT`ini qo'shadi va boshqa tabledan ma'lumot oladi:
+
+```
+/products?id=1 UNION SELECT username, password FROM users
+```
+
+**Error-based** — ma'lumot xato xabari orqali chiqadi. Masalan PostgreSQL'da type castni buzish orqali:
+
+```
+/products?id=1 AND CAST((SELECT current_user) AS int) = 1
+```
+
+Xato xabarida `invalid input syntax for type integer: "app_user"` ko'rinadi — ya'ni ma'lumot xatoning o'zida qaytdi. Shu sababli production'da SQL xatolarini foydalanuvchiga ko'rsatmaslik kerak.
+
+### 2. Blind SQLi
+
+Ilova natijani ham, xatoni ham ko'rsatmaydi. Lekin hujumchi savolni "ha/yo'q" ko'rinishida berib, javobni ilova xatti-harakatidan bilib oladi.
+
+**Boolean-based** — sahifa mazmuni o'zgarishiga qarab:
+
+```
+/products?id=1 AND (SELECT substring(current_user,1,1)) = 'a'
+```
+
+**Time-based** — javob vaqtiga qarab. Agar shart rost bo'lsa, DB 5 sekund kutadi:
+
+```sql
+-- MySQL
+1 AND IF((SELECT COUNT(*) FROM users) > 100, SLEEP(5), 0)
+
+-- PostgreSQL
+1 AND (SELECT CASE WHEN (SELECT COUNT(*) FROM users) > 100
+                   THEN pg_sleep(5) ELSE pg_sleep(0) END) IS NULL
+```
+
+Blind SQLi sekin, lekin avtomatlashtirilgan tool bilan butun bazani harf-baharf o'qib olish mumkin.
+
+### 3. Out-of-band SQLi
+
+Ma'lumot boshqa kanal orqali chiqariladi — masalan DB serverdan hujumchining DNS yoki HTTP serveriga so'rov yuborish. Bu ko'pincha DB user'ning ortiqcha huquqlari (MySQL'da `FILE`, MS SQL'da `xp_dirtree`) borligida ishlaydi.
+
+### 4. Second-order (stored) SQLi
+
+Eng ayyor turi. Hujumchi kiritgan matn birinchi so'rovda xavfsiz saqlanadi, lekin **keyinroq** boshqa joyda (masalan cron job, report generator yoki admin panelda) string concatenation bilan ishlatiladi va shu yerda ishga tushadi.
+
+<Callout type="warning" emoji="">
+Shu sababli "bu ma'lumot bazadan keldi, demak ishonchli" degan qoida **xato**. Har qanday manbadan kelgan qiymat parametr sifatida uzatilishi kerak.
+</Callout>
+
+## Amaliy zaif ilova misoli
+
+Quyida real loyihalarda uchraydigan tipik zaif endpoint:
+
+```js
+// ❌ ZAIF: id, sort va order — hammasi to'g'ridan-to'g'ri so'rovga ulanadi
+app.get('/api/products', async (req, res) => {
+  const { category, sort, order } = req.query;
+  const sql = `
+    SELECT id, name, price FROM products
+    WHERE category = '${category}'
+    ORDER BY ${sort} ${order}
+  `;
+  const [rows] = await conn.query(sql);
+  res.json(rows);
+});
+```
+
+Bu yerda uchta xato bor:
+
+1. `category` — string qiymat concatenation bilan qo'yilgan;
+2. `sort` — column nomi, uni parametr qilib bo'lmaydi (buni allowlist bilan hal qilamiz);
+3. `order` — `ASC`/`DESC`, u ham allowlist talab qiladi.
+
+## Himoya usullari
+
+### 1. Prepared statements (parameterized queries)
+
+Bu **asosiy va yagona ishonchli** himoya. Prepared statement'da SQL strukturasi DB'ga alohida yuboriladi, qiymatlar esa alohida. DB qiymatni hech qachon kod sifatida bajarmaydi.
+
+**Node.js (mysql2):**
+
+```js
+// ✅ TO'G'RI — execute() haqiqiy prepared statement ishlatadi
+const [rows] = await conn.execute(
+  'SELECT id, email FROM users WHERE email = ? AND status = ?',
+  [email, 'active']
+);
+```
+
+<Callout type="info" emoji="">
+`mysql2`da `query()` va `execute()` farqi bor: `query()` qiymatlarni client tomonida escape qiladi, `execute()` esa serverga prepared statement yuboradi. Ikkalasi ham placeholder bilan xavfsiz, lekin `execute()` afzal.
+</Callout>
+
+**Python (psycopg2 / PostgreSQL):**
+
+```python
+# ✅ TO'G'RI — driver qiymatni o'zi bind qiladi
+cur.execute(
+    "SELECT id, email FROM users WHERE email = %s AND status = %s",
+    (email, "active"),
+)
+
+# ❌ ZAIF — % formatlash yoki f-string ishlatmang
+cur.execute(f"SELECT id FROM users WHERE email = '{email}'")
+```
+
+**PHP (PDO):**
+
+```php
+// ✅ TO'G'RI
+$pdo = new PDO($dsn, $user, $pass, [
+    PDO::ATTR_EMULATE_PREPARES => false,   // haqiqiy prepared statement
+    PDO::ATTR_ERRMODE          => PDO::ERRMODE_EXCEPTION,
+]);
+
+$stmt = $pdo->prepare('SELECT id, email FROM users WHERE email = :email');
+$stmt->execute(['email' => $email]);
+```
+
+**Go (database/sql):**
+
+```go
+// ✅ TO'G'RI — PostgreSQL uchun $1, MySQL uchun ?
+row := db.QueryRow(
+    "SELECT id, email FROM users WHERE email = $1", email,
+)
+```
+
+**Java (JDBC):**
+
+```java
+// ✅ TO'G'RI
+PreparedStatement ps = conn.prepareStatement(
+    "SELECT id, email FROM users WHERE email = ?");
+ps.setString(1, email);
+ResultSet rs = ps.executeQuery();
+```
+
+### 2. ORM ishlatish — lekin ehtiyot bo'lib
+
+ORM (Prisma, SQLAlchemy, GORM, Hibernate, Eloquent) odatda avtomatik parametrizatsiya qiladi. Lekin raw query imkoniyati har birida bor va aynan shu yerda zaiflik tug'iladi:
+
+```js
+// ❌ ZAIF — template literal ichida qiymat
+await prisma.$queryRawUnsafe(
+  `SELECT * FROM users WHERE email = '${email}'`
+);
+
+// ✅ TO'G'RI — $queryRaw parametrlarni o'zi bind qiladi
+await prisma.$queryRaw`SELECT * FROM users WHERE email = ${email}`;
+```
+
+```python
+# ❌ ZAIF — SQLAlchemy'da ham raw string xavfli
+session.execute(f"SELECT * FROM users WHERE email = '{email}'")
+
+# ✅ TO'G'RI — bound parameter
+from sqlalchemy import text
+session.execute(
+    text("SELECT * FROM users WHERE email = :email"), {"email": email}
+)
+```
+
+### 3. Column nomi va ORDER BY uchun allowlist
+
+Placeholder faqat **qiymat** uchun ishlaydi. Table nomi, column nomi, `ASC`/`DESC`, `LIMIT` yo'nalishi — bularni parametr qilib bo'lmaydi. Ularni **allowlist** (ruxsat etilganlar ro'yxati) bilan tekshiring:
+
+```js
+// ✅ TO'G'RI — foydalanuvchi kiritgan qiymat faqat ro'yxatdan tanlanadi
+const SORTABLE = { name: 'name', price: 'price', date: 'created_at' };
+const ORDERS   = { asc: 'ASC', desc: 'DESC' };
+
+const sortColumn = SORTABLE[req.query.sort] ?? 'created_at';
+const direction  = ORDERS[String(req.query.order).toLowerCase()] ?? 'DESC';
+
+const [rows] = await conn.execute(
+  `SELECT id, name, price FROM products
+   WHERE category = ?
+   ORDER BY ${sortColumn} ${direction}
+   LIMIT ?`,
+  [req.query.category, limit]
+);
+```
+
+Bu yerda `sortColumn` foydalanuvchi matni emas — bizning kodimizdagi qiymat. Hujumchi `sort=price; DROP TABLE users` yuborsa, `SORTABLE` obyektida bunday kalit yo'q va default qiymat ishlatiladi.
+
+### 4. Input validation — qo'shimcha qatlam
+
+Validation SQLi'ga yechim **emas**, lekin hujum maydonini kichraytiradi. `id` raqam bo'lishi kerak bo'lsa, uni raqamga aylantiring; email formatini tekshiring; uzunlikni cheklang:
+
+```js
+const id = Number.parseInt(req.params.id, 10);
+if (!Number.isInteger(id) || id < 1) {
+  return res.status(400).json({ error: 'invalid id' });
+}
+```
+
+<Callout type="warning" emoji="">
+Blacklist (`'`, `--`, `DROP` kabi so'zlarni filtrlash) — ishonchsiz usul. Encoding, comment variantlari va katta-kichik harflar orqali uni chetlab o'tish oson. Allowlist va prepared statement ishlating.
+</Callout>
+
+### 5. Least privilege — DB user huquqlarini cheklash
+
+Zaiflik topilsa, zarar hajmini DB user'ning huquqlari belgilaydi. Ilova hech qachon `root` yoki `postgres` superuser bilan ulanmasligi kerak.
+
+**MySQL:**
+
+```sql
+CREATE USER 'app'@'10.0.%' IDENTIFIED BY 'strong-password';
+
+-- Faqat kerakli huquqlar, faqat kerakli database'ga
+GRANT SELECT, INSERT, UPDATE, DELETE ON app_db.* TO 'app'@'10.0.%';
+
+-- FILE, SUPER, PROCESS, GRANT OPTION — hech qachon bermang
+FLUSH PRIVILEGES;
+```
+
+`FILE` huquqi hujumchiga `LOAD_FILE()` bilan server fayllarini o'qish va `INTO OUTFILE` bilan fayl yozish imkonini beradi. Uni bermaslik va `secure_file_priv` ni yoqib qo'yish kerak:
+
+```ini
+# /etc/mysql/mysql.conf.d/mysqld.cnf
+secure_file_priv = /var/lib/mysql-files
+local_infile     = 0
+```
+
+**PostgreSQL:**
+
+```sql
+CREATE ROLE app LOGIN PASSWORD 'strong-password';
+
+-- public schema'da hamma narsa yaratish huquqini olib tashlash
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+
+GRANT CONNECT ON DATABASE app_db TO app;
+GRANT USAGE ON SCHEMA app TO app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA app TO app;
+
+-- Migration uchun alohida, kuchliroq role ishlatilsin
+```
+
+Read-only reportlar uchun alohida `SELECT`-only user ajratish ham yaxshi amaliyot.
+
+### 6. Xato xabarlarini yashirish
+
+Production'da SQL xatosi foydalanuvchiga chiqmasligi kerak — u error-based SQLi uchun tayyor ma'lumot manbai. Xatoni logga yozing, foydalanuvchiga umumiy xabar qaytaring:
+
+```js
+try {
+  const [rows] = await conn.execute(sql, params);
+  res.json(rows);
+} catch (err) {
+  logger.error({ err }, 'db query failed');       // to'liq xato — logga
+  res.status(500).json({ error: 'internal error' }); // foydalanuvchiga — umumiy
+}
+```
+
+PostgreSQL tomonida ham xato batafsilligini kamaytirish mumkin:
+
+```ini
+# postgresql.conf
+log_min_error_statement = error
+log_statement = 'ddl'
+```
+
+### 7. WAF — oxirgi qatlam, birinchi emas
+
+WAF (ModSecurity + OWASP CRS, Cloudflare, AWS WAF) ko'p avtomatlashtirilgan hujumlarni to'sadi va sizga vaqt beradi. Lekin u **kodni tuzatishning o'rnini bosmaydi** — bypass texnikalari doim topiladi.
+
+Nginx uchun ModSecurity misoli:
+
+```nginx
+# nginx.conf
+modsecurity on;
+modsecurity_rules_file /etc/nginx/modsec/main.conf;
+```
+
+```apache
+# /etc/nginx/modsec/main.conf
+Include /etc/nginx/modsec/modsecurity.conf
+Include /usr/share/modsecurity-crs/crs-setup.conf
+Include /usr/share/modsecurity-crs/rules/*.conf
+SecRuleEngine On
+```
+
+### 8. Stored procedure — avtomatik xavfsiz emas
+
+Ko'pchilik "stored procedure ishlatsam SQLi bo'lmaydi" deb o'ylaydi. Bu xato — procedure ichida dynamic SQL bo'lsa, zaiflik saqlanadi:
+
+```sql
+-- ❌ ZAIF procedure
+CREATE PROCEDURE find_user(IN p_email VARCHAR(255))
+BEGIN
+  SET @sql = CONCAT('SELECT * FROM users WHERE email = ''', p_email, '''');
+  PREPARE stmt FROM @sql;
+  EXECUTE stmt;
+END;
+```
+
+## Zaiflikni tekshirish
+
+### sqlmap bilan qo'lda tekshirish
+
+`sqlmap` — SQLi topish va ekspluatatsiya qilish uchun standart tool. **Faqat o'zingizga tegishli yoki yozma ruxsat olingan tizimda** ishlatiladi:
+
+```bash
+# Bitta parametrni tekshirish
+sqlmap -u "https://staging.example.com/api/products?id=1" \
+  --batch --level=2 --risk=1
+
+# Autentifikatsiya talab qilinsa — cookie bilan
+sqlmap -u "https://staging.example.com/api/orders?id=1" \
+  --cookie="session=abc123" --batch
+
+# POST body va JSON uchun
+sqlmap -u "https://staging.example.com/api/login" \
+  --data='{"email":"a@b.c","password":"x"}' \
+  --headers="Content-Type: application/json" --batch
+```
+
+Topilgan zaiflikni tasdiqlash uchun `--dbs` yoki `--current-user` ishlatib ko'rish mumkin, lekin production ma'lumotini dump qilishdan saqlaning.
+
+### CI/CD ga static analysis qo'shish
+
+Eng arzon himoya — zaif kodni merge'gacha ushlash. `semgrep` SQLi patternlarini yaxshi topadi.
+
+**GitLab CI:**
+
+```yaml
+sast:sqli:
+  stage: test
+  image: returntocorp/semgrep:latest
+  script:
+    - semgrep --config=p/sql-injection --config=p/security-audit --error .
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+```
+
+**GitHub Actions:**
+
+```yaml
+name: SAST
+on: [pull_request]
+
+jobs:
+  semgrep:
+    runs-on: ubuntu-latest
+    container:
+      image: returntocorp/semgrep
+    steps:
+      - uses: actions/checkout@v4
+      - run: semgrep --config=p/sql-injection --error .
+```
+
+<Callout type="info" emoji="">
+`--error` flagi zaiflik topilganda pipeline'ni fail qiladi. Avval `--error` siz ishga tushirib, mavjud xatolarni tozalab oling, keyin majburiy qiling — aks holda barcha MR'lar qizil bo'lib qoladi.
+</Callout>
+
+### Monitoring va detection
+
+Kodni tuzatgandan keyin ham hujum urinishlarini kuzatib turish kerak:
+
+* WAF loglarida `sqli` qoidalari bo'yicha alert qo'ying (CRS `942xxx` qoidalari);
+* ilova loglarida bir xil IP'dan ketma-ket 500 xatolar yoki g'ayritabiiy uzun query stringlar — SQLi skanerlash belgisi;
+* PostgreSQL'da `pg_stat_statements` orqali odatiy bo'lmagan so'rov shakllarini kuzatish mumkin;
+* MySQL'da `slow_query_log` time-based SQLi (`SLEEP()`) urinishlarini ko'rsatib beradi.
+
+## Tekshiruv ro'yxati
+
+Loyihani topshirishdan oldin shu ro'yxatni bosib chiqing:
+
+* Kodda string concatenation bilan qurilgan **birorta** SQL so'rov qolmadi;
+* barcha qiymatlar placeholder (`?`, `$1`, `:name`) orqali uzatiladi;
+* column nomi va `ORDER BY` allowlist bilan tekshiriladi;
+* ORM'ning raw query joylari alohida ko'rib chiqildi;
+* ilova DB user'i superuser emas va faqat kerakli huquqlarga ega;
+* migration uchun alohida role ishlatiladi;
+* SQL xatolari foydalanuvchiga ko'rinmaydi, faqat logga yoziladi;
+* CI'da SAST (semgrep/CodeQL) ishlaydi;
+* WAF yoqilgan va uning loglari monitoring'ga ulangan.
+
+## Xulosa
+
+SQL Injection'ni oldini olish murakkab emas — **qiymatni hech qachon SQL matniga qo'shmaslik** yetarli. Prepared statement har bir tilda va har bir driverda bor, u tezroq ham ishlaydi (DB query planni cache qiladi).
+
+Qolgan choralar — least privilege, xatolarni yashirish, WAF, SAST — bu qatlamlar (defense in depth). Ular bitta xato qilib qo'yganingizda zararni kamaytiradi, lekin prepared statement'ning o'rnini bosmaydi.
+
+## Qo'shimcha
+
+<Callout type="info" emoji="">
+
+Qo'shimcha Resurslar
+ * [**MySQL Kirish**](/guides/database/start-mysql)
+ * [**PostgreSQL Kirish**](/guides/database/postgresql-kirish)
+ * [**SQL querylar bilan ishlash**](/guides/database/postgresql-bilan-ishlash)
+ * [**PostgreSQL Cluster yaratish**](/guides/database/postgres-cluster-sozlash)
+
+Qo'llanma uchun foydalanilgan resurslar
+ * [**OWASP: SQL Injection**](https://owasp.org/www-community/attacks/SQL_Injection)
+ * [**OWASP SQL Injection Prevention Cheat Sheet**](https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html)
+ * [**OWASP Top 10: A03:2021 – Injection**](https://owasp.org/Top10/A03_2021-Injection/)
+ * [**PortSwigger Web Security Academy: SQL injection**](https://portswigger.net/web-security/sql-injection)
+ * [**sqlmap rasmiy dokumentatsiyasi**](https://github.com/sqlmapproject/sqlmap/wiki)
+
+**Sana:** 2026.07.30(2026-yil 30-iyul)
+
+**Muallif: Otabek Ismoilov**
+
+| [Telegram](https://t.me/Otabek_Ismoilov) | [GitHub](https://github.com/ismoilovdevml) | [LinkedIn](https://www.linkedin.com/in/otabek-ismoilov/) |
+| - | - | - |
+
+</Callout>

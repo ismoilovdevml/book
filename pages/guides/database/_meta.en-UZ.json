@@ -52,6 +52,12 @@
       "icon": "▶️",
       "description": "PostgreSQL-da SQL querylar bilan ishlash",
       "href": "/guides/database/postgresql-bilan-ishlash"
+    },
+    "sql-injection": {
+      "title": "SQL Injection",
+      "icon": "▶️",
+      "description": "SQL Injection nima va uni qanday oldini olish mumkin",
+      "href": "/guides/database/sql-injection"
     }
   }
   

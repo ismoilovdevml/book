@@ -1,0 +1,476 @@
+---
+description: "SQL Injection Attack: what it is and how to prevent it"
+---
+
+import { Callout } from "nextra-theme-docs";
+
+# SQL Injection Attack: What It Is and How to Prevent It
+
+## Introduction
+
+**SQL Injection** (**SQLi** for short) is a vulnerability that lets an attacker inject their own code into the SQL query your application sends to the database. The root cause is almost always the same: **user input is concatenated into the SQL query as a plain string**.
+
+Despite being old and well known, SQLi has never left the OWASP Top 10 (A03:2021 — Injection). It reappears in every new project, in every admin panel written in a hurry, and in every report endpoint added "temporarily".
+
+What an attacker can do with SQLi:
+
+* dump the entire `users` table (password hashes, emails, phone numbers);
+* bypass authentication and log in as an administrator;
+* modify or delete data;
+* in some cases read server files or execute commands (when the database user has more privileges than it needs).
+
+<Callout type="warning" emoji="">
+The attack examples in this guide are **only for testing and hardening your own systems**. Probing someone else's system without written permission is a crime.
+</Callout>
+
+## How SQL Injection works
+
+The classic example is a login form. The vulnerable code builds the query with string concatenation:
+
+```js
+// ❌ VULNERABLE CODE — never write it this way
+const email = req.body.email;
+const rows = await conn.query(
+  "SELECT id, email FROM users WHERE email = '" + email + "'"
+);
+```
+
+For a normal user entering `otabek@example.com`, the query becomes:
+
+```sql
+SELECT id, email FROM users WHERE email = 'otabek@example.com'
+```
+
+Now the attacker enters this into the email field:
+
+```
+' OR 1=1 -- 
+```
+
+And the query turns into:
+
+```sql
+SELECT id, email FROM users WHERE email = '' OR 1=1 -- '
+```
+
+`OR 1=1` is always true and `--` comments out the rest. The query returns **every** user, and in many applications that means logging in as the first user — usually the admin.
+
+The root of the problem: for the database, `' OR 1=1 -- ` was no longer text, it became **SQL code**. Data and code got mixed together.
+
+## Types of SQL Injection
+
+### 1. In-band (classic) SQLi
+
+The attacker sees the result in the same response.
+
+**UNION-based** — the attacker appends their own `SELECT` and reads another table:
+
+```
+/products?id=1 UNION SELECT username, password FROM users
+```
+
+**Error-based** — data leaks through the error message. For example, by breaking a type cast in PostgreSQL:
+
+```
+/products?id=1 AND CAST((SELECT current_user) AS int) = 1
+```
+
+The error reads `invalid input syntax for type integer: "app_user"` — the data came back inside the error itself. This is why SQL errors must never be shown to users in production.
+
+### 2. Blind SQLi
+
+The application shows neither the result nor the error. But the attacker can ask yes/no questions and read the answer from how the application behaves.
+
+**Boolean-based** — based on changes in page content:
+
+```
+/products?id=1 AND (SELECT substring(current_user,1,1)) = 'a'
+```
+
+**Time-based** — based on response time. If the condition is true, the database waits 5 seconds:
+
+```sql
+-- MySQL
+1 AND IF((SELECT COUNT(*) FROM users) > 100, SLEEP(5), 0)
+
+-- PostgreSQL
+1 AND (SELECT CASE WHEN (SELECT COUNT(*) FROM users) > 100
+                   THEN pg_sleep(5) ELSE pg_sleep(0) END) IS NULL
+```
+
+Blind SQLi is slow, but an automated tool can read the whole database character by character.
+
+### 3. Out-of-band SQLi
+
+Data is exfiltrated through a different channel — for example, by making the database server send a DNS or HTTP request to the attacker's server. This usually depends on excessive privileges (`FILE` in MySQL, `xp_dirtree` in MS SQL).
+
+### 4. Second-order (stored) SQLi
+
+The sneakiest kind. The attacker's input is stored safely by the first query, but is **later** used with string concatenation somewhere else — a cron job, a report generator, or an admin panel — and fires there.
+
+<Callout type="warning" emoji="">
+This is why "the value came from our own database, so it's trusted" is **wrong**. Every value, regardless of its source, must be passed as a parameter.
+</Callout>
+
+## A realistic vulnerable endpoint
+
+Here is a typical vulnerable endpoint you'll actually find in real projects:
+
+```js
+// ❌ VULNERABLE: id, sort and order are all concatenated into the query
+app.get('/api/products', async (req, res) => {
+  const { category, sort, order } = req.query;
+  const sql = `
+    SELECT id, name, price FROM products
+    WHERE category = '${category}'
+    ORDER BY ${sort} ${order}
+  `;
+  const [rows] = await conn.query(sql);
+  res.json(rows);
+});
+```
+
+There are three separate mistakes here:
+
+1. `category` — a string value inserted by concatenation;
+2. `sort` — a column name, which cannot be parameterized (we'll solve it with an allowlist);
+3. `order` — `ASC`/`DESC`, which also needs an allowlist.
+
+## How to prevent it
+
+### 1. Prepared statements (parameterized queries)
+
+This is the **primary and only reliable** defense. With a prepared statement the SQL structure is sent to the database separately from the values, so the database never executes a value as code.
+
+**Node.js (mysql2):**
+
+```js
+// ✅ CORRECT — execute() uses a real prepared statement
+const [rows] = await conn.execute(
+  'SELECT id, email FROM users WHERE email = ? AND status = ?',
+  [email, 'active']
+);
+```
+
+<Callout type="info" emoji="">
+In `mysql2` there is a difference between `query()` and `execute()`: `query()` escapes values on the client side, while `execute()` sends a prepared statement to the server. Both are safe with placeholders, but prefer `execute()`.
+</Callout>
+
+**Python (psycopg2 / PostgreSQL):**
+
+```python
+# ✅ CORRECT — the driver binds the value itself
+cur.execute(
+    "SELECT id, email FROM users WHERE email = %s AND status = %s",
+    (email, "active"),
+)
+
+# ❌ VULNERABLE — never use % formatting or f-strings
+cur.execute(f"SELECT id FROM users WHERE email = '{email}'")
+```
+
+**PHP (PDO):**
+
+```php
+// ✅ CORRECT
+$pdo = new PDO($dsn, $user, $pass, [
+    PDO::ATTR_EMULATE_PREPARES => false,   // real prepared statements
+    PDO::ATTR_ERRMODE          => PDO::ERRMODE_EXCEPTION,
+]);
+
+$stmt = $pdo->prepare('SELECT id, email FROM users WHERE email = :email');
+$stmt->execute(['email' => $email]);
+```
+
+**Go (database/sql):**
+
+```go
+// ✅ CORRECT — $1 for PostgreSQL, ? for MySQL
+row := db.QueryRow(
+    "SELECT id, email FROM users WHERE email = $1", email,
+)
+```
+
+**Java (JDBC):**
+
+```java
+// ✅ CORRECT
+PreparedStatement ps = conn.prepareStatement(
+    "SELECT id, email FROM users WHERE email = ?");
+ps.setString(1, email);
+ResultSet rs = ps.executeQuery();
+```
+
+### 2. Use an ORM — but carefully
+
+ORMs (Prisma, SQLAlchemy, GORM, Hibernate, Eloquent) parameterize automatically. But every one of them offers a raw-query escape hatch, and that is exactly where the vulnerability appears:
+
+```js
+// ❌ VULNERABLE — value inside a template literal
+await prisma.$queryRawUnsafe(
+  `SELECT * FROM users WHERE email = '${email}'`
+);
+
+// ✅ CORRECT — $queryRaw binds parameters itself
+await prisma.$queryRaw`SELECT * FROM users WHERE email = ${email}`;
+```
+
+```python
+# ❌ VULNERABLE — raw strings are dangerous in SQLAlchemy too
+session.execute(f"SELECT * FROM users WHERE email = '{email}'")
+
+# ✅ CORRECT — bound parameter
+from sqlalchemy import text
+session.execute(
+    text("SELECT * FROM users WHERE email = :email"), {"email": email}
+)
+```
+
+### 3. Allowlists for column names and ORDER BY
+
+Placeholders only work for **values**. Table names, column names, `ASC`/`DESC`, sort direction — none of these can be parameterized. Validate them against an **allowlist**:
+
+```js
+// ✅ CORRECT — user input only selects from a fixed list
+const SORTABLE = { name: 'name', price: 'price', date: 'created_at' };
+const ORDERS   = { asc: 'ASC', desc: 'DESC' };
+
+const sortColumn = SORTABLE[req.query.sort] ?? 'created_at';
+const direction  = ORDERS[String(req.query.order).toLowerCase()] ?? 'DESC';
+
+const [rows] = await conn.execute(
+  `SELECT id, name, price FROM products
+   WHERE category = ?
+   ORDER BY ${sortColumn} ${direction}
+   LIMIT ?`,
+  [req.query.category, limit]
+);
+```
+
+Here `sortColumn` is not user text — it is a value from our own code. If the attacker sends `sort=price; DROP TABLE users`, there is no such key in `SORTABLE` and the default is used.
+
+### 4. Input validation — an extra layer
+
+Validation is **not** a fix for SQLi, but it shrinks the attack surface. If `id` must be a number, convert it to a number; check the email format; limit lengths:
+
+```js
+const id = Number.parseInt(req.params.id, 10);
+if (!Number.isInteger(id) || id < 1) {
+  return res.status(400).json({ error: 'invalid id' });
+}
+```
+
+<Callout type="warning" emoji="">
+Blacklisting (filtering out `'`, `--`, `DROP` and friends) is unreliable. Encoding tricks, comment variants and mixed case make it easy to bypass. Use allowlists and prepared statements.
+</Callout>
+
+### 5. Least privilege — restrict the database user
+
+If a vulnerability does slip through, the blast radius is decided by the database user's privileges. The application must never connect as `root` or as the `postgres` superuser.
+
+**MySQL:**
+
+```sql
+CREATE USER 'app'@'10.0.%' IDENTIFIED BY 'strong-password';
+
+-- Only the privileges it needs, only on the database it needs
+GRANT SELECT, INSERT, UPDATE, DELETE ON app_db.* TO 'app'@'10.0.%';
+
+-- FILE, SUPER, PROCESS, GRANT OPTION — never grant these
+FLUSH PRIVILEGES;
+```
+
+The `FILE` privilege lets an attacker read server files with `LOAD_FILE()` and write files with `INTO OUTFILE`. Don't grant it, and keep `secure_file_priv` enabled:
+
+```ini
+# /etc/mysql/mysql.conf.d/mysqld.cnf
+secure_file_priv = /var/lib/mysql-files
+local_infile     = 0
+```
+
+**PostgreSQL:**
+
+```sql
+CREATE ROLE app LOGIN PASSWORD 'strong-password';
+
+-- Remove the default "everyone can create objects" grant on public
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+
+GRANT CONNECT ON DATABASE app_db TO app;
+GRANT USAGE ON SCHEMA app TO app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA app TO app;
+
+-- Use a separate, more privileged role for migrations
+```
+
+A separate `SELECT`-only user for read-only reports is good practice too.
+
+### 6. Hide error messages
+
+In production a SQL error must never reach the user — it is ready-made intelligence for error-based SQLi. Log the error, return a generic message:
+
+```js
+try {
+  const [rows] = await conn.execute(sql, params);
+  res.json(rows);
+} catch (err) {
+  logger.error({ err }, 'db query failed');          // full error — to the log
+  res.status(500).json({ error: 'internal error' }); // generic — to the user
+}
+```
+
+You can also reduce error verbosity on the PostgreSQL side:
+
+```ini
+# postgresql.conf
+log_min_error_statement = error
+log_statement = 'ddl'
+```
+
+### 7. WAF — the last layer, not the first
+
+A WAF (ModSecurity + OWASP CRS, Cloudflare, AWS WAF) blocks most automated attacks and buys you time. But it **does not replace fixing the code** — bypass techniques are always found.
+
+ModSecurity with Nginx:
+
+```nginx
+# nginx.conf
+modsecurity on;
+modsecurity_rules_file /etc/nginx/modsec/main.conf;
+```
+
+```apache
+# /etc/nginx/modsec/main.conf
+Include /etc/nginx/modsec/modsecurity.conf
+Include /usr/share/modsecurity-crs/crs-setup.conf
+Include /usr/share/modsecurity-crs/rules/*.conf
+SecRuleEngine On
+```
+
+### 8. Stored procedures are not automatically safe
+
+Many people assume "if I use stored procedures there is no SQLi". That's wrong — if the procedure builds dynamic SQL, the vulnerability is still there:
+
+```sql
+-- ❌ VULNERABLE procedure
+CREATE PROCEDURE find_user(IN p_email VARCHAR(255))
+BEGIN
+  SET @sql = CONCAT('SELECT * FROM users WHERE email = ''', p_email, '''');
+  PREPARE stmt FROM @sql;
+  EXECUTE stmt;
+END;
+```
+
+## Testing for the vulnerability
+
+### Manual testing with sqlmap
+
+`sqlmap` is the standard tool for finding and exploiting SQLi. Use it **only on systems you own or have written permission to test**:
+
+```bash
+# Test a single parameter
+sqlmap -u "https://staging.example.com/api/products?id=1" \
+  --batch --level=2 --risk=1
+
+# With authentication — pass the cookie
+sqlmap -u "https://staging.example.com/api/orders?id=1" \
+  --cookie="session=abc123" --batch
+
+# POST body and JSON
+sqlmap -u "https://staging.example.com/api/login" \
+  --data='{"email":"a@b.c","password":"x"}' \
+  --headers="Content-Type: application/json" --batch
+```
+
+To confirm a finding you can try `--dbs` or `--current-user`, but avoid dumping production data.
+
+### Add static analysis to CI/CD
+
+The cheapest defense is catching vulnerable code before it merges. `semgrep` is good at spotting SQLi patterns.
+
+**GitLab CI:**
+
+```yaml
+sast:sqli:
+  stage: test
+  image: returntocorp/semgrep:latest
+  script:
+    - semgrep --config=p/sql-injection --config=p/security-audit --error .
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+```
+
+**GitHub Actions:**
+
+```yaml
+name: SAST
+on: [pull_request]
+
+jobs:
+  semgrep:
+    runs-on: ubuntu-latest
+    container:
+      image: returntocorp/semgrep
+    steps:
+      - uses: actions/checkout@v4
+      - run: semgrep --config=p/sql-injection --error .
+```
+
+<Callout type="info" emoji="">
+The `--error` flag fails the pipeline when a finding appears. Run it without `--error` first, clean up the existing findings, and only then make it blocking — otherwise every MR turns red.
+</Callout>
+
+### Monitoring and detection
+
+Even after fixing the code, keep watching for attack attempts:
+
+* alert on WAF `sqli` rules (CRS rules in the `942xxx` range);
+* in application logs, repeated 500s from one IP or unusually long query strings are a sign of SQLi scanning;
+* on PostgreSQL, `pg_stat_statements` reveals unusual query shapes;
+* on MySQL, `slow_query_log` exposes time-based SQLi attempts (`SLEEP()`).
+
+## Checklist
+
+Walk through this list before shipping:
+
+* **no** SQL query in the codebase is built with string concatenation;
+* every value is passed through a placeholder (`?`, `$1`, `:name`);
+* column names and `ORDER BY` are validated against an allowlist;
+* every raw-query call in the ORM has been reviewed;
+* the application's database user is not a superuser and holds only the privileges it needs;
+* migrations use a separate role;
+* SQL errors never reach the user, only the log;
+* SAST (semgrep/CodeQL) runs in CI;
+* the WAF is enabled and its logs are wired into monitoring.
+
+## Conclusion
+
+Preventing SQL Injection is not complicated — **never concatenate a value into SQL text** is enough. Prepared statements exist in every language and every driver, and they are usually faster too, because the database caches the query plan.
+
+The rest — least privilege, hidden errors, WAF, SAST — are layers of defense in depth. They limit the damage when you slip up, but none of them replaces prepared statements.
+
+## Additional resources
+
+<Callout type="info" emoji="">
+
+Related guides
+ * [**Introduction to MySQL**](/guides/database/start-mysql)
+ * [**Introduction to PostgreSQL**](/guides/database/postgresql-kirish)
+ * [**Working with SQL Queries**](/guides/database/postgresql-bilan-ishlash)
+ * [**PostgreSQL Cluster Setup**](/guides/database/postgres-cluster-sozlash)
+
+References used for this guide
+ * [**OWASP: SQL Injection**](https://owasp.org/www-community/attacks/SQL_Injection)
+ * [**OWASP SQL Injection Prevention Cheat Sheet**](https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html)
+ * [**OWASP Top 10: A03:2021 – Injection**](https://owasp.org/Top10/A03_2021-Injection/)
+ * [**PortSwigger Web Security Academy: SQL injection**](https://portswigger.net/web-security/sql-injection)
+ * [**sqlmap official documentation**](https://github.com/sqlmapproject/sqlmap/wiki)
+
+**Date:** 2026.07.30 (July 30, 2026)
+
+**Author: Otabek Ismoilov**
+
+| [Telegram](https://t.me/Otabek_Ismoilov) | [GitHub](https://github.com/ismoilovdevml) | [LinkedIn](https://www.linkedin.com/in/otabek-ismoilov/) |
+| - | - | - |
+
+</Callout>
