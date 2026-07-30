@@ -10,6 +10,47 @@ const Zoom = dynamic(() => import('react-medium-image-zoom'), {
 
 const github = 'https://github.com/ismoilovdevml/devops-journey';
 
+const SITE_URL = 'https://devops-journey.uz';
+const DEFAULT_LOCALE = 'en-UZ';
+
+// `en-UZ` is a Next.js locale id, not a language: the content behind it is
+// Uzbek. Search engines must be told `uz`, otherwise every article is filed as
+// English written in Uzbekistan.
+const LOCALE_HREFLANG: Record<string, string> = {
+  'en-UZ': 'uz',
+  en: 'en',
+  ru: 'ru',
+};
+
+const localePrefix = (locale?: string) =>
+  !locale || locale === DEFAULT_LOCALE ? '' : `/${locale}`;
+
+// Mirrors scripts/generate-sitemap.mjs so canonical URLs and sitemap entries
+// are byte-identical — a mismatch makes Google pick its own canonical.
+const absoluteUrl = (locale: string | undefined, path: string) => {
+  const prefix = localePrefix(locale);
+  return path ? `${SITE_URL}${prefix}${path}` : `${SITE_URL}${prefix || '/'}`;
+};
+
+// Turns the internal route back into the URL a visitor actually sees.
+// Nextra's middleware rewrites /guides/x to /guides/x.en-UZ, so asPath carries
+// the locale suffix at prerender time — publishing that as canonical would
+// point search engines at a URL that only exists internally.
+const canonicalPath = (asPath: string) => {
+  const path = (asPath.split(/[?#]/)[0] ?? '/')
+    .replace(/\.(en-UZ|en|ru)$/, '')
+    .replace(/\/index$/, '')
+    .replace(/\/$/, '');
+  return path === '/' ? '' : path;
+};
+
+const DEFAULT_DESCRIPTIONS: Record<string, string> = {
+  'en-UZ':
+    "DevOps bo'yicha bepul ta'lim platformasi bo'lgan DevOps Journey-ga xush kelibsiz",
+  en: 'Welcome to DevOps Journey - a free educational platform for DevOps',
+  ru: 'Добро пожаловать в DevOps Journey - бесплатная образовательная платформа по DevOps',
+};
+
 const TITLE_WITH_TRANSLATIONS = {
   'en-UZ': 'DevOps Journey',
   'en': 'DevOps Journey',
@@ -87,34 +128,63 @@ const config: DocsThemeConfig = {
     );
   },
   useNextSeoProps() {
+    // Everything that describes the page for crawlers and social cards lives
+    // here. It used to be split between this hook and `head()`, which emitted a
+    // second, stale copy of description/og:title on every page.
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    const { frontMatter } = useConfig();
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    const { locale, asPath } = useRouter();
+
+    const description =
+      frontMatter?.description ||
+      DEFAULT_DESCRIPTIONS[locale as string] ||
+      DEFAULT_DESCRIPTIONS[DEFAULT_LOCALE];
+
+    const image = frontMatter?.type
+      ? `${SITE_URL}/api/og?title=${frontMatter?.ogImageText}&category=Developing`
+      : frontMatter?.image || `${SITE_URL}/banner.png`;
+
+    const path = canonicalPath(asPath);
+    const canonical = absoluteUrl(locale, path);
+
     return {
-      titleTemplate: `%s - DevOps Journey`,
+      titleTemplate: '%s - DevOps Journey',
+      description,
+      canonical,
+      // Placeholder pages carry `untranslated: true`. Indexing 124 near
+      // identical "not translated yet" pages would only dilute the real
+      // Uzbek article, so they are kept out of the index but stay crawlable
+      // so the link to the Uzbek version is still followed.
+      ...(frontMatter?.untranslated ? { noindex: true } : {}),
+      languageAlternates: Object.entries(LOCALE_HREFLANG).map(
+        ([loc, hreflang]) => ({
+          hrefLang: hreflang,
+          href: absoluteUrl(loc, path),
+        })
+      ),
+      openGraph: {
+        type: 'website',
+        locale: locale as string,
+        url: canonical,
+        title: frontMatter?.title
+          ? `${frontMatter.title} - DevOps Journey`
+          : 'DevOps Journey',
+        description,
+        images: [{ url: image }],
+      },
+      twitter: {
+        cardType: 'summary_large_image',
+      },
     };
   },
   head() {
-    // eslint-disable-next-line react-hooks/rules-of-hooks
-    const { frontMatter } = useConfig();
-
     // eslint-disable-next-line react-hooks/rules-of-hooks
     const { theme } = useTheme();
 
     // eslint-disable-next-line react-hooks/rules-of-hooks
     const { locale } = useRouter();
-    const title = frontMatter?.title || 'DevOps Journey';
-    const defaultDescriptions: Record<string, string> = {
-      'en-UZ': "DevOps bo'yicha bepul ta'lim platformasi bo'lgan DevOps Journey-ga xush kelibsiz",
-      'en': "Welcome to DevOps Journey - a free educational platform for DevOps",
-      'ru': "Добро пожаловать в DevOps Journey - бесплатная образовательная платформа по DevOps",
-    };
-    const description =
-      frontMatter?.description ||
-      defaultDescriptions[locale as string] || defaultDescriptions['en-UZ'];
-    const image = frontMatter?.type
-      ? `https://devops-journey.uz/api/og?title=${frontMatter?.ogImageText}&category=Developing`
-      : frontMatter?.image || '/banner.png';
     const folder = theme === 'light' ? '/light' : '/dark';
-
-    const composedTitle = `${title} - DevOps Journey`;
 
     return (
       <>
@@ -148,17 +218,10 @@ const config: DocsThemeConfig = {
         <meta name="theme-color" content="#ffffff" />
         <meta name="msapplication-TileColor" content="#00a300" />
         <link rel="manifest" href={`${folder}/site.webmanifest`} />
-        <meta httpEquiv="Content-Language" content={locale || 'en'} />
-        <meta name="title" content={composedTitle} />
-        <meta name="description" content={description} />
-
-        <meta name="twitter:card" content="summary_large_image" />
-        <meta name="twitter:image" content={image} />
-
-        <meta property="og:description" content={description} />
-        <meta property="og:title" content={composedTitle} />
-        <meta property="og:image" content={image} />
-        <meta property="og:type" content="website" />
+        <meta
+          httpEquiv="Content-Language"
+          content={LOCALE_HREFLANG[locale as string] || 'uz'}
+        />
         <meta
           name="apple-mobile-web-app-title"
           content="DevOps Journey"

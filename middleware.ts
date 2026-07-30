@@ -12,7 +12,16 @@ const redirects: Record<string, string> = {
     '/guides/monitoring/apm-server-sozlash',
 };
 
+// Served straight from `public/`. Nextra's locale middleware only skips a fixed
+// list of extensions, and `.txt` isn't one of them — without this it rewrites
+// /robots.txt to /robots.txt.en-UZ and the crawler gets a 404.
+const PUBLIC_FILES = new Set(['/robots.txt', '/sitemap.xml']);
+
 export function middleware(request: NextRequest) {
+  if (PUBLIC_FILES.has(request.nextUrl.pathname)) {
+    return NextResponse.next();
+  }
+
   // Handle redirect in `_middleware.ts` because of bug using `next.config.js`
   // https://github.com/shuding/nextra/issues/384
   if (request.nextUrl.pathname in redirects) {

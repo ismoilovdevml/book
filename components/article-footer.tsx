@@ -25,12 +25,14 @@ import {
 
 import type { Post } from 'pages/api/logic';
 
+// `label` feeds aria-label: these buttons hold nothing but an icon, so without
+// it screen readers announce them as "button" and Lighthouse flags them.
 const SHARE_BUTTONS = [
-  { Button: FacebookShareButton, Icon: IconBrandFacebook },
-  { Button: TwitterShareButton, Icon: IconBrandX },
-  { Button: TelegramShareButton, Icon: IconBrandTelegram },
-  { Button: LinkedinShareButton, Icon: IconBrandLinkedin },
-  { Button: EmailShareButton, Icon: IconMail },
+  { Button: FacebookShareButton, Icon: IconBrandFacebook, label: 'Facebook' },
+  { Button: TwitterShareButton, Icon: IconBrandX, label: 'X (Twitter)' },
+  { Button: TelegramShareButton, Icon: IconBrandTelegram, label: 'Telegram' },
+  { Button: LinkedinShareButton, Icon: IconBrandLinkedin, label: 'LinkedIn' },
+  { Button: EmailShareButton, Icon: IconMail, label: 'Email' },
 ] as const;
 
 const Button: React.FC<
@@ -118,6 +120,7 @@ const ArticleFooter = () => {
         <div className="w-2" />
         <div className="flex flex-col items-center w-8">
           <Button
+            aria-label="Maqolaga like bosish"
             isActive={localStatus == 'liked'}
             disabled={buttonsDisabled}
             onClick={() => like.mutateAsync()}
@@ -128,6 +131,7 @@ const ArticleFooter = () => {
         </div>
         <div className="flex flex-col items-center w-8">
           <Button
+            aria-label="Maqolaga dislike bosish"
             isActive={localStatus == 'disliked'}
             disabled={buttonsDisabled}
             onClick={() => dislike.mutateAsync()}
@@ -137,8 +141,9 @@ const ArticleFooter = () => {
           <span>{post?.dislikes ?? 0}</span>
         </div>
         <div className="w-2" />
-        {SHARE_BUTTONS.map(({ Button, Icon }) => (
+        {SHARE_BUTTONS.map(({ Button, Icon, label }) => (
           <Button
+            aria-label={`${label}da ulashish`}
             url={window.location.href}
             className={[
               'w-9 h-9 flex items-center justify-center border-2 border-black/40 dark:border-white/20 p-1 rounded transition-all',

@@ -1,0 +1,55 @@
+name: Quality
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  links:
+    name: Internal links
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
+      - name: Check internal links
+        run: node scripts/check-links.mjs
+
+  lighthouse:
+    name: Lighthouse
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
+      - name: Install pnpm
+        run: corepack enable && corepack prepare pnpm@8.15.4 --activate
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Start server
+        run: |
+          pnpm start &
+          npx --yes wait-on http://localhost:3000 --timeout 60000
+
+      # Only the SEO category blocks the pipeline — it guards the canonical,
+      # hreflang and robots setup. The rest report as warnings until the image
+      # pipeline and dependency upgrades land.
+      - name: Run Lighthouse
+        uses: treosh/lighthouse-ci-action@v12
+        with:
+          urls: |
+            http://localhost:3000/
+            http://localhost:3000/guides/monitoring/elk-setup
+            http://localhost:3000/en/guides/ci-cd/gitlab-server
+          configPath: ./.lighthouserc.json
+          uploadArtifacts: true
+          temporaryPublicStorage: true

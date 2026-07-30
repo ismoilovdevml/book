@@ -9,9 +9,10 @@
   },
   "scripts": {
     "dev": "dotenv-run -- next dev",
-    "build": "next build",
+    "build": "node scripts/generate-sitemap.mjs && next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "check:links": "node scripts/check-links.mjs"
   },
   "dependencies": {
     "@giscus/react": "^3.0.0",
