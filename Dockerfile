@@ -1,5 +1,5 @@
 # Dependencies stage
-FROM node:20-slim AS deps
+FROM node:24-slim AS deps
 
 WORKDIR /app
 
@@ -20,7 +20,7 @@ COPY package.json pnpm-lock.yaml* .npmrc* ./
 RUN pnpm install --frozen-lockfile
 
 # Builder stage
-FROM node:20-slim AS builder
+FROM node:24-slim AS builder
 
 WORKDIR /app
 
@@ -35,7 +35,7 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN pnpm build
 
 # Production stage
-FROM node:20-slim AS runner
+FROM node:24-slim AS runner
 
 WORKDIR /app
 

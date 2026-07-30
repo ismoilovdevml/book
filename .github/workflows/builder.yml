@@ -12,20 +12,22 @@ jobs:
 
     strategy:
       matrix:
-        node-version: [20.x]
+        node-version: [24.x]
 
     steps:
     - uses: actions/checkout@v4
 
     - name: Use Node.js ${{ matrix.node-version }}
-      uses: actions/setup-node@v3
+      uses: actions/setup-node@v4
       with:
         node-version: ${{ matrix.node-version }}
+    # corepack pins pnpm to the packageManager field, so CI resolves the same
+    # versions as the lockfile instead of whatever pnpm major is latest
     - name: Install pnpm
-      run: npm install -g pnpm
-      
+      run: corepack enable && corepack prepare pnpm@8.15.4 --activate
+
     - name: Install dependencies
-      run: pnpm install
+      run: pnpm install --frozen-lockfile
 
     - name: Build app
       run: pnpm next build
